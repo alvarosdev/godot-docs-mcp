@@ -66,12 +66,17 @@ process_version() {
     fi
 
     # 3. Convert RST → Markdown (parallel, capped at MAX_WORKERS).
+    # Skip `_chunk` files — they are partial RST snippets included by other
+    # documents and cannot be parsed standalone by pandoc.
     local rst_count
-    rst_count=$(find "$version_dir" -name '*.rst' | wc -l)
+    rst_count=$(find "$version_dir" -name '*.rst' ! -name '*_chunk*' | wc -l)
     echo "  Converting $rst_count RST files to Markdown (max $MAX_WORKERS workers)..."
-    find "$version_dir" -name '*.rst' -print0 \
+    find "$version_dir" -name '*.rst' ! -name '*_chunk*' -print0 \
         | xargs -0 -P "$MAX_WORKERS" -I {} bash -c \
-            'pandoc "$1" -o "${1%.rst}.md" && rm "$1"' _ {}
+            'pandoc "$1" -o "${1%.rst}.md" 2>/dev/null && rm "$1" || echo "  [SKIP] $1"' _ {}
+
+    # Remove leftover _chunk RST files (not converted, not needed as .md).
+    find "$version_dir" -name '*_chunk*' -delete 2>/dev/null || true
 
     # 4. Cleanup non-.md files and empty directories.
     echo "  Cleaning up..."
