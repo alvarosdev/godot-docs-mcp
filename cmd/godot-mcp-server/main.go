@@ -1,0 +1,149 @@
+// Godot MCP Server — serves Godot Engine documentation through MCP.
+//
+// Supports stdio and streamable HTTP transports with optional
+// bearer-token authentication.
+package main
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/auth"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/alvarosdev/godot-docs-mcp/internal/docs"
+	"github.com/alvarosdev/godot-docs-mcp/internal/resources"
+	"github.com/alvarosdev/godot-docs-mcp/internal/server"
+	"github.com/alvarosdev/godot-docs-mcp/internal/tools"
+)
+
+func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+
+	// Read all configuration once at startup — never in hot paths.
+	cfg := server.LoadConfig()
+
+	logger.Info("Starting Godot MCP Server",
+		"transport", cfg.Transport,
+	)
+
+	// Validate docs directory exists.
+	if _, err := os.Stat(cfg.DocsRoot); os.IsNotExist(err) {
+		logger.Warn("Documentation directory not found. Some tools may not work.",
+			"docs_dir", cfg.DocsRoot,
+		)
+	}
+
+	// Load documentation into memory.
+	store := docs.NewDocStore()
+	if err := store.Load(cfg.DocsRoot); err != nil {
+		logger.Warn("Could not load documentation", "error", err)
+	} else {
+		logger.Info("Documentation loaded", "files", store.Size())
+	}
+
+	// Load version metadata.
+	versionMeta, err := docs.LoadVersionMetadata(cfg.DocsRoot)
+	if err != nil {
+		logger.Warn("Could not load version metadata", "error", err)
+	} else {
+		logger.Info("Versions available",
+			"versions", versionMeta.Versions,
+			"latest", versionMeta.Latest,
+		)
+	}
+
+	// Create MCP server and register tools/resources.
+	srv := server.New(logger)
+	tools.RegisterTools(srv, store, versionMeta, cfg.DocsRoot)
+	resources.RegisterResources(srv, store, cfg.DocsRoot)
+
+	ctx, cancel := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	switch cfg.Transport {
+	case "stdio":
+		logger.Info("Starting stdio transport")
+		if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil {
+			logger.Error("Server error", "error", err)
+			os.Exit(1)
+		}
+
+	default: // "http", "streamable-http", "sse"
+		if err := runHTTP(ctx, logger, srv, cfg); err != nil {
+			logger.Error("HTTP server error", "error", err)
+			os.Exit(1)
+		}
+	}
+}
+
+// runHTTP starts the server with streamable HTTP transport.
+func runHTTP(ctx context.Context, logger *slog.Logger, srv *mcp.Server, cfg server.Config) error {
+	handler := mcp.NewStreamableHTTPHandler(
+		func(r *http.Request) *mcp.Server { return srv },
+		&mcp.StreamableHTTPOptions{},
+	)
+
+	// Wrap with auth middleware if a token is configured.
+	var mux http.Handler = handler
+	if cfg.AuthToken != "" {
+		token := cfg.AuthToken // capture once
+		verifier := func(_ context.Context, tokenStr string, _ *http.Request) (*auth.TokenInfo, error) {
+			if subtle.ConstantTimeCompare([]byte(tokenStr), []byte(token)) != 1 {
+				return nil, auth.ErrInvalidToken
+			}
+			return &auth.TokenInfo{}, nil
+		}
+		authMw := auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{})
+		mux = authMw(handler)
+		logger.Info("Authentication enabled — Bearer token required")
+	}
+
+	// Route: MCP at configured path, health at /health.
+	mcpPath := cfg.Path
+	if mcpPath == "" {
+		mcpPath = "/mcp"
+	}
+	http.Handle(mcpPath, mux)
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+	})
+
+	addr := fmt.Sprintf("%s:%s", cfg.Host, cfg.Port)
+	httpSrv := &http.Server{
+		Addr:         addr,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	logger.Info("Listening", "addr", addr, "path", mcpPath)
+
+	// Graceful shutdown: wait for signal, then drain.
+	go func() {
+		<-ctx.Done()
+		logger.Info("Shutting down HTTP server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("HTTP shutdown error", "error", err)
+		}
+	}()
+
+	if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}

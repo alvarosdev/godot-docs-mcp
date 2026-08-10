@@ -1,0 +1,25 @@
+# Python (to be removed)
+srcs/
+docs_converter/
+tests/
+__pycache__/
+.venv/
+*.py
+*.pyc
+uv.lock
+pyproject.toml
+main.py
+
+# Project
+openspec/
+.claude/
+.git/
+.gitignore
+.env
+.env.example
+deploy/
+img/
+
+# Go (keep go.mod, go.sum for build)
+*.test
+*.out

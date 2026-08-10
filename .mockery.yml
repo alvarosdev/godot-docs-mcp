@@ -1,0 +1,10 @@
+all: false
+template: testify
+packages:
+  github.com/alvarosdev/godot-docs-mcp/internal/docs:
+    interfaces:
+      DocStoreReader:
+        config:
+          dir: "{{.InterfaceDir}}"
+          filename: "store_mock.go"
+          structname: "Mock{{.InterfaceName}}"
