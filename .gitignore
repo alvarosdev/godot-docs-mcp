@@ -1,4 +1,18 @@
-__pycache__
+# Binary
+godot-mcp-server
+*.test
+*.out
+
+# Environment
 .env
-*venv*
+
+# Documentation (generated in CI, not committed)
 docs/
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
