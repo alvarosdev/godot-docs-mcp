@@ -21,6 +21,7 @@ import (
 
 	"github.com/alvarosdev/godot-docs-mcp/internal/docs"
 	"github.com/alvarosdev/godot-docs-mcp/internal/resources"
+	"github.com/alvarosdev/godot-docs-mcp/internal/search"
 	"github.com/alvarosdev/godot-docs-mcp/internal/server"
 	"github.com/alvarosdev/godot-docs-mcp/internal/tools"
 )
@@ -63,9 +64,15 @@ func main() {
 		)
 	}
 
+	// Create search engine over the loaded docs.
+	var searcher *search.Searcher
+	if versionMeta != nil {
+		searcher = search.New(store, versionMeta.Versions)
+	}
+
 	// Create MCP server and register tools/resources.
 	srv := server.New(logger)
-	tools.RegisterTools(srv, store, versionMeta, cfg.DocsRoot)
+	tools.RegisterTools(srv, store, versionMeta, cfg.DocsRoot, searcher)
 	resources.RegisterResources(srv, store, cfg.DocsRoot)
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
@@ -115,8 +122,9 @@ func runHTTP(ctx context.Context, logger *slog.Logger, srv *mcp.Server, cfg serv
 	if mcpPath == "" {
 		mcpPath = "/mcp"
 	}
-	http.Handle(mcpPath, mux)
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux2 := http.NewServeMux()
+	mux2.Handle(mcpPath, mux)
+	mux2.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 	})
@@ -124,6 +132,7 @@ func runHTTP(ctx context.Context, logger *slog.Logger, srv *mcp.Server, cfg serv
 	addr := fmt.Sprintf("%s:%s", cfg.Host, cfg.Port)
 	httpSrv := &http.Server{
 		Addr:         addr,
+		Handler:      mux2,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,

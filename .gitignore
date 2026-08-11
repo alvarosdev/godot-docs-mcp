@@ -6,8 +6,8 @@ godot-mcp-server
 # Environment
 .env
 
-# Documentation (generated in CI, not committed)
-docs/
+# Documentation (generated in CI, not committed — only at repo root)
+/docs/
 
 # Go
 vendor/
@@ -16,3 +16,4 @@ vendor/
 .idea/
 .vscode/
 *.swp
+

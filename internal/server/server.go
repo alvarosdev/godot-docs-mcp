@@ -4,6 +4,7 @@ package server
 import (
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -51,7 +52,7 @@ func New(logger *slog.Logger) *mcp.Server {
 		Logger: logger,
 		// KeepAlive detects abandoned sessions and cleans up goroutines
 		// (mitigates SDK goroutine leak in streamable HTTP, issue #499).
-		KeepAlive:                 0, // disabled by default — enable for production
+		KeepAlive:                 5 * time.Minute, // detect abandoned sessions, release goroutines
 		KeepAliveFailureThreshold: 3,
 	}
 

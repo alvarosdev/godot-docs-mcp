@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alvarosdev/godot-docs-mcp/internal/docs"
+	"github.com/alvarosdev/godot-docs-mcp/internal/search"
 )
 
 func TestGetAvailableVersions_Success(t *testing.T) {
@@ -115,4 +116,39 @@ func TestGetDocumentationFile_NotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Content[0].(*mcp.TextContent).Text, "not found")
+}
+
+// ─── search_documentation tests ──────────────────────────────────────────
+
+func TestSearchDocumentation_Success(t *testing.T) {
+	store := docs.NewDocStore()
+	searcher := search.New(store, []string{"4.7"})
+
+	// Searcher needs real docs — skip if store is empty.
+	handler := makeSearchDocumentation(searcher)
+	result, _, err := handler(nil, nil, searchDocArgs{
+		Query: "nonexistent_xyz",
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+	// Should return a valid response (empty results message, not error)
+}
+
+func TestSearchDocumentation_EmptyQuery(t *testing.T) {
+	handler := makeSearchDocumentation(nil)
+	result, _, err := handler(nil, nil, searchDocArgs{
+		Query: "",
+	})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+}
+
+func TestSearchDocumentation_NilSearcher(t *testing.T) {
+	handler := makeSearchDocumentation(nil)
+	result, _, err := handler(nil, nil, searchDocArgs{
+		Query: "test",
+	})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].(*mcp.TextContent).Text, "not available")
 }

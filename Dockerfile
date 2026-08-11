@@ -6,7 +6,7 @@
 # ============================================================
 
 # Stage 1: Build Go binary
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26 AS builder
 
 WORKDIR /app
 
@@ -18,9 +18,9 @@ COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/godot-mcp-server ./cmd/godot-mcp-server
 
 # Stage 2: Runtime
-FROM alpine:3.22
+FROM alpine:3.23
 
-RUN apk add --no-cache ca-certificates curl
+RUN apk add --no-cache ca-certificates curl tree
 
 COPY --from=builder /out/godot-mcp-server /usr/local/bin/
 

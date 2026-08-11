@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# generate-docs.sh — Download Godot docs, convert RST→MD, produce versioned artifact.
-# Runs in CI (ubuntu-latest with pandoc, curl, jq, tree, unzip installed).
+# generate-docs.sh — Download Godot docs, clean up, produce versioned artifact.
+# No conversion — serves original RST files directly to LLMs.
+# Runs in CI (ubuntu-latest with curl, jq, tree, unzip installed).
 #
 # Usage: scripts/generate-docs.sh "3.6,4.7"
 #        scripts/generate-docs.sh "4.7"
 
-MAX_WORKERS=8
 DOCS_DIR="docs"
 GODOT_DOCS_REPO="https://github.com/godotengine/godot-docs"
 TEMP_DIR=$(mktemp -d)
@@ -65,25 +65,32 @@ process_version() {
         return 1
     fi
 
-    # 3. Convert RST → Markdown (parallel, capped at MAX_WORKERS).
-    # Skip `_chunk` files — they are partial RST snippets included by other
-    # documents and cannot be parsed standalone by pandoc.
-    local rst_count
-    rst_count=$(find "$version_dir" -name '*.rst' ! -name '*_chunk*' | wc -l)
-    echo "  Converting $rst_count RST files to Markdown (max $MAX_WORKERS workers)..."
-    find "$version_dir" -name '*.rst' ! -name '*_chunk*' -print0 \
-        | xargs -0 -P "$MAX_WORKERS" -I {} bash -c \
-            'pandoc "$1" -o "${1%.rst}.md" 2>/dev/null && rm "$1" || echo "  [SKIP] $1"' _ {}
-
-    # Remove leftover _chunk RST files (not converted, not needed as .md).
-    find "$version_dir" -name '*_chunk*' -delete 2>/dev/null || true
-
-    # 4. Cleanup non-.md files and empty directories.
+    # 3. Cleanup: remove Sphinx/Python/build artifacts.
+    #    RST files are served directly — no pandoc conversion needed.
     echo "  Cleaning up..."
-    find "$version_dir" -type f ! -name '*.md' ! -name 'docs_tree.txt' -delete
-    find "$version_dir" -type d -empty -delete 2>/dev/null || true
+    local trash_dirs=(
+        "_extensions" "_static" "_templates" "_tools"
+        ".github"
+    )
+    local trash_files=(
+        "conf.py" "Makefile" "make.bat" "pyproject.toml"
+        "requirements.txt" ".readthedocs.yml"
+        ".gitattributes" ".git-blame-ignore-revs" ".gitignore"
+        ".editorconfig" ".mailmap" ".lycheeignore"
+        ".pre-commit-config.yaml"
+        "404.rst" "AUTHORS.md" "robots.txt" "README.md"
+    )
+    for d in "${trash_dirs[@]}"; do
+        rm -rf "$version_dir/$d" 2>/dev/null || true
+    done
+    for f in "${trash_files[@]}"; do
+        rm -f "$version_dir/$f" 2>/dev/null || true
+    done
+    # Remove any remaining non-.rst files, then empty dirs.
+    find "$version_dir" -type f ! -name '*.rst' ! -name 'docs_tree.txt' -delete 2>/dev/null || true
+    find "$version_dir" -depth -type d -empty -delete 2>/dev/null || true
 
-    # 5. Generate docs tree.
+    # 4. Generate docs tree.
     echo "  Generating docs tree..."
     if command -v tree &>/dev/null; then
         tree "$version_dir" > "$version_dir/docs_tree.txt"
@@ -91,9 +98,9 @@ process_version() {
         echo "  WARNING: 'tree' command not found, skipping tree generation"
     fi
 
-    local md_count
-    md_count=$(find "$version_dir" -name '*.md' | wc -l)
-    echo "  Version $version done: $md_count .md files."
+    local rst_count
+    rst_count=$(find "$version_dir" -name '*.rst' | wc -l)
+    echo "  Version $version done: $rst_count .rst files."
 }
 
 generate_versions_json() {
