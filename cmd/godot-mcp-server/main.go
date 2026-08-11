@@ -105,15 +105,7 @@ func runHTTP(ctx context.Context, logger *slog.Logger, srv *mcp.Server, cfg serv
 	// Wrap with auth middleware if a token is configured.
 	var mux http.Handler = handler
 	if cfg.AuthToken != "" {
-		token := cfg.AuthToken // capture once
-		verifier := func(_ context.Context, tokenStr string, _ *http.Request) (*auth.TokenInfo, error) {
-			if subtle.ConstantTimeCompare([]byte(tokenStr), []byte(token)) != 1 {
-				return nil, auth.ErrInvalidToken
-			}
-			return &auth.TokenInfo{}, nil
-		}
-		authMw := auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{})
-		mux = authMw(handler)
+		mux = staticTokenAuthMiddleware(cfg.AuthToken)(handler)
 		logger.Info("Authentication enabled — Bearer token required")
 	}
 
@@ -155,4 +147,20 @@ func runHTTP(ctx context.Context, logger *slog.Logger, srv *mcp.Server, cfg serv
 		return err
 	}
 	return nil
+}
+
+// staticTokenAuthMiddleware wraps a handler with bearer-token auth against a
+// static env-var token. The TokenInfo carries no Expiration (a static token
+// is valid for the process lifetime), so AllowMissingExpiration MUST be set —
+// otherwise the SDK rejects every request with "token missing expiration".
+func staticTokenAuthMiddleware(token string) func(http.Handler) http.Handler {
+	verifier := func(_ context.Context, tokenStr string, _ *http.Request) (*auth.TokenInfo, error) {
+		if subtle.ConstantTimeCompare([]byte(tokenStr), []byte(token)) != 1 {
+			return nil, auth.ErrInvalidToken
+		}
+		return &auth.TokenInfo{}, nil
+	}
+	return auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{
+		AllowMissingExpiration: true,
+	})
 }

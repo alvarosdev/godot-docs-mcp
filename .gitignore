@@ -1,5 +1,5 @@
-# Binary
-godot-mcp-server
+# Binary (root-only — do not ignore cmd/godot-mcp-server/)
+/godot-mcp-server
 *.test
 *.out
 
@@ -11,6 +11,7 @@ godot-mcp-server
 
 # Go
 vendor/
+dist/
 
 # IDE
 .idea/
