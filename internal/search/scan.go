@@ -3,6 +3,7 @@
 package search
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -31,7 +32,8 @@ func New(store docs.DocStoreReader, versions []string) *Searcher {
 
 // Search runs a query and returns ranked results up to limit.
 // If version is non-empty, only that version's docs are searched.
-func (s *Searcher) Search(query string, version string, limit int) []Result {
+// If category is non-empty, only docs whose path starts with category+"/" are searched.
+func (s *Searcher) Search(query string, version string, category string, limit int) []Result {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -48,6 +50,9 @@ func (s *Searcher) Search(query string, version string, limit int) []Result {
 	for _, key := range s.store.Keys() {
 		docVersion, docPath := splitVersion(key)
 		if version != "" && docVersion != version {
+			continue
+		}
+		if category != "" && !strings.HasPrefix(docPath, category+"/") {
 			continue
 		}
 
@@ -81,6 +86,7 @@ func (s *Searcher) Search(query string, version string, limit int) []Result {
 
 // ─── tokenizer ───────────────────────────────────────────────────────────
 
+// stopWords is hoisted to package level to avoid reallocation per call.
 var stopWords = map[string]bool{
 	"a": true, "an": true, "the": true, "is": true, "are": true,
 	"was": true, "were": true, "be": true, "been": true, "being": true,
@@ -92,12 +98,14 @@ var stopWords = map[string]bool{
 }
 
 func tokenize(query string) []string {
-	words := strings.Fields(query)
+	// Lowercase once for the entire query to avoid per-token lowercasing.
+	lowerQuery := strings.ToLower(query)
+	words := strings.Fields(lowerQuery)
 	tokens := make([]string, 0, len(words))
 	seen := make(map[string]bool, len(words))
 	const maxTokens = 50
 	for _, w := range words {
-		w = strings.ToLower(strings.TrimFunc(w, isPunct))
+		w = strings.TrimFunc(w, isPunct)
 		if len(w) < 2 || stopWords[w] || seen[w] {
 			continue
 		}
@@ -116,12 +124,21 @@ func isPunct(r rune) bool {
 
 // ─── scoring ─────────────────────────────────────────────────────────────
 
+// filenameBoost is the multiplier applied when a query token matches the
+// file's class name stem (e.g., "CharacterBody2D" → "characterbody2d").
+const filenameBoost = 10.0
+
+// headingRe is hoisted to package level to avoid recompilation.
+// Matches GFM ATX headings: ^#{1,6}\s+
+var headingRe = regexp.MustCompile(`^#{1,6}\s+`)
+
 func score(tokens []string, content string, path string) float64 {
+	// Lowercase content once; reused for coverage and snippet.
 	contentLower := strings.ToLower(content)
 
 	// Token coverage: fraction of query tokens found.
 	matched := 0
-	positions := make(map[string][]int)
+	positions := make(map[string][]int, len(tokens))
 	for _, t := range tokens {
 		pos := findPositions(contentLower, t)
 		if len(pos) > 0 {
@@ -132,7 +149,7 @@ func score(tokens []string, content string, path string) float64 {
 	coverage := float64(matched) / float64(len(tokens))
 
 	// Heading boost: 3× for matches in heading lines.
-	headingBoost := headingScore(contentLower, tokens, positions)
+	headingBoost := headingScore(contentLower, tokens)
 
 	// Section boost: classes/ > tutorials/ > other.
 	sectionBoost := sectionScore(path)
@@ -140,7 +157,17 @@ func score(tokens []string, content string, path string) float64 {
 	// Proximity bonus: how close together the tokens appear.
 	proximity := proximityScore(positions)
 
-	return coverage * headingBoost * sectionBoost * proximity
+	// Filename match boost: query tokens matching the class name get 10×.
+	className := extractClassName(path)
+	fnBoost := 1.0
+	for _, t := range tokens {
+		if t == className {
+			fnBoost = filenameBoost
+			break
+		}
+	}
+
+	return coverage * headingBoost * sectionBoost * proximity * fnBoost
 }
 
 func findPositions(content, token string) []int {
@@ -157,21 +184,18 @@ func findPositions(content, token string) []int {
 	return pos
 }
 
-// headingScore returns 3.0 if any token appears in a heading line,
-// 1.0 otherwise.
-func headingScore(content string, tokens []string, positions map[string][]int) float64 {
-	lines := strings.Split(content, "\n")
+// headingScore returns 3.0 if any token appears in a heading line, 1.0 otherwise.
+// Content is already lowercased; no additional lowercasing per line.
+func headingScore(contentLower string, tokens []string) float64 {
+	lines := strings.Split(contentLower, "\n")
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		// Markdown ATX headings (# or ##) and RST-style underlines (=== or ---)
-		if strings.HasPrefix(trimmed, "#") ||
-			(strings.HasPrefix(trimmed, "=") && !strings.Contains(trimmed, " ")) ||
-			(len(trimmed) > 2 && strings.Trim(trimmed, "=-") == "") {
-			for _, t := range tokens {
-				if strings.Contains(lower, t) {
-					return 3.0
-				}
+		if !headingRe.MatchString(trimmed) {
+			continue
+		}
+		for _, t := range tokens {
+			if strings.Contains(trimmed, t) {
+				return 3.0
 			}
 		}
 	}
@@ -223,45 +247,72 @@ func proximityScore(positions map[string][]int) float64 {
 
 // ─── snippet extraction ──────────────────────────────────────────────────
 
+// markupReplacer is hoisted to avoid rebuilding on each snippet call.
+var markupReplacer = strings.NewReplacer(
+	"```", "",
+	"`", "",
+	"**", "",
+	"__", "",
+	"*", "",
+	"_", "",
+	"#", "",
+)
+
 func extractSnippet(content string, tokens []string) string {
+	// Single-pass: lowercase once, compute positions once, find best window via positions.
 	contentLower := strings.ToLower(content)
 
-	// Find the highest-density region of matches.
-	bestStart := -1
-	bestCount := 0
-	const window = 200
-	for i := 0; i < len(contentLower); i += 50 {
-		end := min(i+window, len(contentLower))
-		slice := contentLower[i:end]
-		count := 0
-		for _, t := range tokens {
-			if strings.Contains(slice, t) {
-				count++
-			}
-		}
-		if count > bestCount {
-			bestCount = count
-			bestStart = i
+	// Collect positions for each token in a single pass per token (via findPositions).
+	positions := make(map[string][]int, len(tokens))
+	var allPositions []int
+	for _, t := range tokens {
+		ps := findPositions(contentLower, t)
+		if len(ps) > 0 {
+			positions[t] = ps
+			allPositions = append(allPositions, ps...)
 		}
 	}
 
-	if bestStart < 0 {
-		// Fallback: use the first match of any token.
-		for _, t := range tokens {
-			if idx := strings.Index(contentLower, t); idx >= 0 {
-				bestStart = max(0, idx-100)
-				break
+	const window = 200
+	bestStart := -1
+
+	if len(allPositions) > 0 {
+		sort.Ints(allPositions)
+		bestCount := 0
+		// Single-pass over sorted positions to find highest-density window.
+		for _, start := range allPositions {
+			count := 0
+			end := start + window
+			for _, t := range tokens {
+				for _, p := range positions[t] {
+					if p >= start && p < end {
+						count++
+						break
+					}
+				}
+			}
+			if count > bestCount {
+				bestCount = count
+				bestStart = start
+				if bestCount == len(tokens) {
+					break
+				}
 			}
 		}
-	}
-	if bestStart < 0 {
+		// Provide a little leading context when possible.
+		if bestStart > 20 {
+			bestStart -= 20
+		}
+		if bestStart < 0 {
+			bestStart = 0
+		}
+	} else {
 		bestStart = 0
 	}
 
-	snippetEnd := min(bestStart+200, len(content))
+	snippetEnd := min(bestStart+window, len(content))
 	snippet := content[bestStart:snippetEnd]
 
-	// Strip common Markdown markup for readability.
 	snippet = stripMarkup(snippet)
 
 	if bestStart > 0 {
@@ -274,18 +325,27 @@ func extractSnippet(content string, tokens []string) string {
 }
 
 func stripMarkup(s string) string {
-	// Remove code fences, heading markers, bold/italic.
-	s = strings.ReplaceAll(s, "```", "")
-	s = strings.ReplaceAll(s, "`", "")
-	s = strings.ReplaceAll(s, "**", "")
-	s = strings.ReplaceAll(s, "__", "")
-	s = strings.ReplaceAll(s, "*", "")
-	s = strings.ReplaceAll(s, "_", "")
-	s = strings.ReplaceAll(s, "#", "")
+	// Single-pass via replacer hoisted to package level.
+	s = markupReplacer.Replace(s)
 	return strings.TrimSpace(s)
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────
+
+// extractClassName derives a lowercase class name stem from a doc path.
+// "classes/class_characterbody2d.rst" → "characterbody2d"
+// "tutorials/2d/movement.rst" → "movement"
+func extractClassName(path string) string {
+	base := path
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		base = path[idx+1:]
+	}
+	// Remove known prefixes and extensions.
+	base = strings.TrimSuffix(base, ".rst")
+	base = strings.TrimSuffix(base, ".md")
+	base = strings.TrimPrefix(base, "class_")
+	return strings.ToLower(base)
+}
 
 // splitVersion splits "4.7/classes/class_node.md" → ("4.7", "classes/class_node.md").
 func splitVersion(key string) (version, rest string) {

@@ -1,12 +1,12 @@
 ## Purpose
 
-Enables full-text search over the in-memory Godot documentation store using zero-dependency token-based scoring with heading, section, and proximity boosts, exposed as an MCP tool.
+Enables full-text search over the in-memory Godot documentation store using zero-dependency token-based scoring with heading, section, proximity, and filename boosts, exposed as an MCP tool with optional category filtering.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Token-based full-text search
 
-The server SHALL expose a `search_documentation` tool that accepts a query string and returns a ranked list of matching documentation files with scores and text snippets. The ranking SHALL be determined by token coverage (fraction of query tokens found in the document), weighted by heading matches (3×), section type (classes > tutorials > other), and match proximity (tokens closer together score higher).
+The server SHALL expose a `search_documentation` tool that accepts a query string and returns a ranked list of matching documentation files with scores and text snippets. The ranking SHALL be determined by token coverage weighted by heading matches (3x), section type boost (2x/1.5x/1x), match proximity (0.5-1.5x), and filename match boost (10x). An optional `category` parameter SHALL filter results by path prefix.
 
 #### Scenario: Single keyword search
 - **WHEN** an MCP client calls `search_documentation` with `query="CharacterBody2D"`
@@ -19,12 +19,20 @@ The server SHALL expose a `search_documentation` tool that accepts a query strin
 - **AND** documents where both tokens appear close together receive a proximity bonus
 
 #### Scenario: Heading match boost
-- **WHEN** a query token matches text inside a Markdown heading (`# CharacterBody2D`) or RST title underline (`===`)
-- **THEN** that match SHALL count 3× compared to a match in body text
+- **WHEN** a query token matches text inside a heading line
+- **THEN** that match SHALL count 3x compared to a match in body text
+
+#### Scenario: Filename match boost for class names
+- **WHEN** a query contains a token matching a file's class name (e.g., "CharacterBody2D" matches `class_characterbody2d.md`)
+- **THEN** that file SHALL receive a 10x score multiplier, ensuring it ranks above files that only mention the term incidentally
 
 #### Scenario: No matches found
 - **WHEN** an MCP client calls `search_documentation` with a query that matches no documents
 - **THEN** the server returns an empty result list with a message indicating no matches were found
+
+#### Scenario: Category filter prefixes the path
+- **WHEN** `category="classes"` is specified
+- **THEN** only files whose doc path starts with `classes/` are included in results
 
 ### Requirement: Version-filtered search
 
@@ -56,16 +64,16 @@ The server SHALL accept an optional `limit` parameter on the `search_documentati
 
 ### Requirement: Snippet extraction
 
-Each search result SHALL include a `snippet` field containing the surrounding context (±100 characters) of the first or highest-density match of the query tokens. Markdown and RST formatting markers (headings, code fences, inline markup) SHALL be stripped from the snippet for readability.
+Each search result SHALL include a `snippet` field containing the surrounding context (+-100 characters) of the first or highest-density match of the query tokens. Markdown and RST formatting markers (headings, code fences, inline markup) SHALL be stripped from the snippet for readability.
 
 #### Scenario: Snippet with surrounding context
 - **WHEN** a search matches a document containing the query tokens
 - **THEN** the `snippet` field shows the matched region with surrounding context
-- **AND** the snippet does not contain raw Markdown heading markers (`#`, `===`) or code fence markers (```)
+- **AND** the snippet does not contain raw markup markers
 
 ### Requirement: Zero external dependencies
 
-The search engine SHALL use only Go standard library packages (`strings`, `sort`, `unicode`). No full-text index library (bleve, FTS5), no external service, and no disk-based index SHALL be required.
+The search engine SHALL use only Go standard library packages. No full-text index library (bleve, FTS5), no external service, and no disk-based index SHALL be required.
 
 #### Scenario: Search runs with no external services
 - **WHEN** the server starts and loads documentation into memory

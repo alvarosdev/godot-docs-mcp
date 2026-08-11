@@ -118,7 +118,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq tree jq curl unzip
+          sudo apt-get install -y -qq pandoc tree jq curl unzip
 
       - name: Generate docs
         run: |

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# generate-docs.sh — Download Godot docs, clean up, produce versioned artifact.
-# No conversion — serves original RST files directly to LLMs.
-# Runs in CI (ubuntu-latest with curl, jq, tree, unzip installed).
+# generate-docs.sh — Download Godot docs, convert RST → GFM, produce versioned artifact.
+# Converts RST to GitHub-Flavored Markdown via pandoc for LLM-friendly output.
+# Failed conversions preserve the original .rst as a fallback.
+# Runs in CI (ubuntu-latest with pandoc, curl, jq, tree, unzip installed).
 #
 # Usage: scripts/generate-docs.sh "3.6,4.7"
 #        scripts/generate-docs.sh "4.7"
 
 DOCS_DIR="docs"
 GODOT_DOCS_REPO="https://github.com/godotengine/godot-docs"
+MAX_WORKERS=8
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
@@ -86,11 +88,30 @@ process_version() {
     for f in "${trash_files[@]}"; do
         rm -f "$version_dir/$f" 2>/dev/null || true
     done
-    # Remove any remaining non-.rst files, then empty dirs.
-    find "$version_dir" -type f ! -name '*.rst' ! -name 'docs_tree.txt' -delete 2>/dev/null || true
+
+    # 4. Convert RST → GFM Markdown (parallel, capped at MAX_WORKERS).
+    #    - Strip Sphinx ".. table::" / ":widths:" directives so grid tables render.
+    #    - Post-clean: drop "classref-*" lines and "<div class=\"rst-class\">" blocks.
+    #    - Delete the source .rst only on successful conversion; keep it as a
+    #      fallback when pandoc fails.
+    local rst_count
+    rst_count=$(find "$version_dir" -name '*.rst' | wc -l)
+    echo "  Converting $rst_count RST files to GFM (max $MAX_WORKERS workers)..."
+    find "$version_dir" -name '*.rst' -print0 \
+        | xargs -0 -P "$MAX_WORKERS" -I {} bash -c '
+            sed "/^\.\. table::$/d; /^   :widths:/d" "$1" \
+                | pandoc -f rst -t gfm --wrap=none 2>/dev/null \
+                | sed "/^<div class=\"rst-class\">$/,/^<\/div>$/d; /^classref-/d; /:::: {#/,/^::::$/d" \
+                > "${1%.rst}.md" \
+            && rm "$1" \
+            || { rm -f "${1%.rst}.md"; echo "  [SKIP] $1"; }
+        ' _ {}
+
+    # 5. Cleanup: preserve .md, .rst (fallback), docs_tree.txt; delete the rest.
+    find "$version_dir" -type f ! -name '*.md' ! -name '*.rst' ! -name 'docs_tree.txt' -delete 2>/dev/null || true
     find "$version_dir" -depth -type d -empty -delete 2>/dev/null || true
 
-    # 4. Generate docs tree.
+    # 6. Generate docs tree.
     echo "  Generating docs tree..."
     if command -v tree &>/dev/null; then
         tree "$version_dir" > "$version_dir/docs_tree.txt"
@@ -98,9 +119,10 @@ process_version() {
         echo "  WARNING: 'tree' command not found, skipping tree generation"
     fi
 
-    local rst_count
-    rst_count=$(find "$version_dir" -name '*.rst' | wc -l)
-    echo "  Version $version done: $rst_count .rst files."
+    local md_count rst_left
+    md_count=$(find "$version_dir" -name '*.md' | wc -l)
+    rst_left=$(find "$version_dir" -name '*.rst' | wc -l)
+    echo "  Version $version done: $md_count .md files, $rst_left .rst fallback."
 }
 
 generate_versions_json() {

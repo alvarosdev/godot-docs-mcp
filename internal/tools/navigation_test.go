@@ -152,3 +152,27 @@ func TestSearchDocumentation_NilSearcher(t *testing.T) {
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Content[0].(*mcp.TextContent).Text, "not available")
 }
+
+// ─── section parsing edge cases ──────────────────────────────────────────
+
+func TestFindSection_NoHeadings(t *testing.T) {
+	content := "Just plain text without any headings. No markdown headings here."
+	_, ok := findSection(content, "Methods")
+	assert.False(t, ok, "should not find section when no headings exist")
+	assert.Empty(t, listSections(content), "listSections should return empty for content with no headings")
+}
+
+func TestFindSection_WhitespaceHeading(t *testing.T) {
+	content := "# Control\n\n   ## Methods   \n\ncontent here\n\n## Signals\n\nsignals here"
+	section, ok := findSection(content, "Methods")
+	require.True(t, ok, "heading with leading/trailing whitespace should be matched")
+	assert.Contains(t, section, "content here")
+	assert.NotContains(t, section, "signals here")
+}
+
+func TestFindSection_WhitespaceQuery(t *testing.T) {
+	content := "# Control\n\n## Methods\n\nmethod body\n\n## Signals\n\n"
+	section, ok := findSection(content, "  Methods  ")
+	require.True(t, ok, "query with whitespace should be trimmed and matched")
+	assert.Contains(t, section, "method body")
+}
